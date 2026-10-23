@@ -13,7 +13,7 @@ from paths import prompt_path
 from tools import CALIBRATION_REVIEW_DIR, search_file_impl
 
 
-def make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
+def make_merger_mcp_server(paper_dir: str, no_cal: bool = False, calibration_mode: str = "vector"):
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     allowed_paths = [os.path.abspath(paper_dir), os.path.abspath(CALIBRATION_REVIEW_DIR)]
@@ -108,7 +108,7 @@ def make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
             low_score = float(q["low_score"]) if "low_score" in q else -1.0
             high_score = float(q["high_score"]) if "high_score" in q else 11.0
             print(f"  [merger:calibration_search] q{i}='{qtext}' n={n} score=({low_score}, {high_score})")
-            body = search_file_impl(qtext, n, "vector", low_score, high_score)
+            body = search_file_impl(qtext, n, calibration_mode, low_score, high_score)
             sections.append(f"### Query {i}: {qtext!r}  (n={n}, score=({low_score}, {high_score}))\n{body}")
         return {"content": [{"type": "text", "text": "\n\n".join(sections)}]}
 
@@ -226,7 +226,7 @@ async def run_harsh_claude_sdk(model_id: str, harsh_prompt_user: str, paper_dir:
     )
 
 
-async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: str, no_cal: bool = False) -> tuple[str, dict]:
+async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: str, no_cal: bool = False, calibration_mode: str = "vector") -> tuple[str, dict]:
     """
     Run the merger agent via Claude Agent SDK.
     Returns (final merged review text, usage dict with cost/tokens/turns).
@@ -240,7 +240,7 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
     cal_instruction = CAL_INSTRUCTION_WITHOUT if no_cal else CAL_INSTRUCTION_WITH
     system_prompt = system_prompt.replace("{{CALIBRATION_INSTRUCTION}}", cal_instruction)
 
-    mcp_server = make_merger_mcp_server(paper_dir, no_cal=no_cal)
+    mcp_server = make_merger_mcp_server(paper_dir, no_cal=no_cal, calibration_mode=calibration_mode)
 
     # Iterative RAG: merger brackets the score range with a first batch of
     # queries, then narrows with a second (and optionally third) batch inside

@@ -2,6 +2,8 @@
 openai-agents==0.18.1
 openai==2.45.0
 claude-agent-sdk==0.2.120
+# Stdio tool server for the Codex and Claude CLI backends.
+mcp==1.30.0
 pydantic==2.13.4
 python-dotenv==1.2.2
 rank-bm25==0.2.2

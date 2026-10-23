@@ -45,15 +45,19 @@ verification. It then calibrates the score by *comparison*, not by intuition:
 The final review carries `<score>` and `<decision>` tags, which the pipeline
 parses out.
 
-Both stages run on either backend:
+Both stages can use any of these backends, including mixed backends:
 
 | Backend | Selected by | Uses |
 | --- | --- | --- |
+| Codex CLI | `--backend codex` or `codex[:model]` | installed `codex exec`, using its existing authentication |
+| Claude Code CLI | `--backend claude` or `claude[:model]` | installed `claude --print`, using its existing authentication |
 | OpenAI Agents SDK | any plain model id | `OpenAIResponsesModel` against any OpenAI-compatible endpoint (default OpenRouter) |
 | Claude Agent SDK | model id prefixed `claude_sdk:` | `ClaudeSDKClient` with the tools exposed as an in-process MCP server |
 
-The two backends see the same prompts and the same tools; only the runtime
-differs.
+The CLI backends use the same stage prompts and a local stdio MCP server for
+`read_file`, `grep_file`, `draft_review`, and `calibration_search`. Each stage
+starts a fresh session. The CLI tool server enforces the draft-before-retrieval
+protocol and the three-batch retrieval limit.
 
 ---
 
@@ -63,13 +67,19 @@ differs.
 git clone https://github.com/weathon/ARD-Review.git
 cd ARD-Review
 pip install -r requirements.txt
-cp .env.example .env    # then fill it in
+cp .env.example .env    # optional for CLI-only runs
 ```
 
-Nothing in the pipeline has a silent default for model choice, reasoning effort
-or endpoint: a missing environment variable is a hard error, so a run can never
-quietly become a different run than the one you asked for. See `.env.example`
-for every variable.
+For direct CLI use, install and sign in to `codex` or `claude` first. Review
+sessions reuse that CLI's authentication; no `REVIEW_API_KEY`, `EXTRACTOR_MODEL`,
+or Datalab key is needed with the local defaults. Subscription limits still
+apply, and the CLIs still contact their model services. See the
+[Codex non-interactive documentation](https://developers.openai.com/codex/noninteractive)
+and [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference).
+
+CLI runs use the CLI's configured model unless `--model` is supplied. The API
+backend still requires explicit model IDs and reasoning effort. See
+`.env.example` for configuration.
 
 For the Claude backend, either put an Anthropic key in `ANTHROPIC_API_KEY` or
 leave it empty to use an authenticated Claude subscription.
@@ -91,6 +101,38 @@ are downloaded automatically from
 [weathon/paper_embeddings](https://huggingface.co/datasets/weathon/paper_embeddings)
 the first time they are needed — no embedding calls and no cost on your side.
 
+CLI runs default to **local BM25 keyword retrieval**, reading scores from the
+corpus files. This requires no embedding API or downloaded embedding matrix.
+It keeps the anchor-comparison workflow but differs from the vector retrieval
+used in the published reference runs. Select `--calibration_mode vector` and
+configure embedding credentials to use semantic retrieval; embedding each
+search query makes an API call.
+
+To use a **Gemini API key directly** while keeping the reviewer on Codex or
+Claude, set these in your ignored `.env`:
+
+```dotenv
+REVIEW_EMBEDDING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+REVIEW_EMBEDDING_API_KEY=your-gemini-api-key
+REVIEW_EMBEDDING_MODEL=gemini-embedding-001
+```
+
+```bash
+uv run python code/main.py --backend codex --single_paper paper.md --calibration_mode vector
+```
+
+Google supports `gemini-embedding-001` through its
+[OpenAI-compatible embedding endpoint](https://ai.google.dev/gemini-api/docs/openai#embeddings).
+The existing corpus vectors expect that model; switching to `text-embedding-004`
+or Gemini Embedding 2 requires rebuilding the corpus embeddings. Query/corpus
+dimension mismatches produce an explicit error.
+
+The first vector retrieval downloads the existing corpus vectors and score
+index; it does not re-embed the 13k papers. Only the search queries are embedded
+with your key. The embedding key and endpoint are independent of reviewer
+authentication. For backward compatibility, they fall back to `REVIEW_API_KEY`
+and `REVIEW_API_BASE_URL` when no separate endpoint is selected.
+
 The corpus file format is load-bearing: the published embeddings were computed
 from exactly these files, so do not reformat or rename them.
 
@@ -102,6 +144,48 @@ not apply to it.
 ---
 
 ## Usage
+
+Direct CLI review, without API credentials or the calibration corpus:
+
+```bash
+python code/main.py --backend codex --single_paper paper.pdf --no_cal
+python code/main.py --backend claude --single_paper paper.md --no_cal
+
+# Equivalent convenience scripts; additional review flags are forwarded.
+./run_codex.sh paper.pdf --no_cal
+./run_claude_cli.sh paper.md --no_cal --model sonnet
+```
+
+Remove `--no_cal` after downloading the calibration corpus to retrieve local
+anchors. For PDFs, CLI runs use Poppler's `pdftotext` (on Debian/Ubuntu:
+`sudo apt install poppler-utils`) and save the full extracted text as
+`paper.extracted.md`. Local extraction does not perform OCR on scanned PDFs.
+Markdown and text inputs need no converter.
+
+To choose different CLIs or models for the two stages:
+
+```bash
+HARSH_MODEL=codex MERGER_MODEL=claude:sonnet \
+python code/main.py --single_paper paper.md --no_cal
+```
+
+`--backend` overrides both model environment variables. `--model` applies to
+both stages and requires `--backend`. Omit `REASONING_EFFORT` to keep each CLI's
+default, or pass `--reasoning_effort` with a value supported by the chosen model.
+`CODEX_CLI_PATH` / `CLAUDE_CLI_PATH` can select an executable outside `PATH`.
+`REVIEW_CLI_TIMEOUT` sets the per-stage timeout in seconds (default 1800).
+Each stage prints the path to a live log under `results/cli/`. Codex tool calls
+and CLI diagnostics appear immediately in the terminal; a heartbeat every 15
+seconds shows elapsed time and time since the last output. Logs contain the raw
+stdout/stderr and persist on errors, timeouts, and Ctrl-C. To follow the detailed
+output in another terminal, run `tail -f` on the printed log path. A long paper
+can take several minutes per stage with a high reasoning effort. Each completed
+stage is also saved as a neighboring `.md` file, and `results/pipeline.log`
+records stage starts and links to their logs immediately.
+If a CLI omits valid score/decision tags, the full review is saved and the
+missing values are reported; no API extraction call is made.
+
+Existing SDK entry points remain available:
 
 ```bash
 ./run_claude.sh  /abs/path/to/paper.pdf     # both stages on Claude Agent SDK
@@ -123,10 +207,16 @@ Flags:
 | Flag | Effect |
 | --- | --- |
 | `--single_paper PATH` | the paper to review (`.pdf`, `.md`, `.txt`) |
+| `--backend codex\|claude` | use an installed CLI for both stages |
+| `--model MODEL` | override that CLI's configured model for both stages |
+| `--reasoning_effort LEVEL` | override `REASONING_EFFORT` or the CLI default |
 | `--no_cal` | drop `calibration_search`; score on paper merits alone |
+| `--calibration_mode bm25\|vector` | local keyword retrieval or API query embeddings |
+| `--pdf_parser local\|datalab` | local `pdftotext` or the Datalab API |
 | `--skip_calibration` | do not map the raw score onto the reference runs |
+| `--calibration_csv PATH` | explicitly choose a reference CSV for score mapping |
 
-PDFs are converted to Markdown first via the Datalab API (needs
+SDK/API runs default to converting PDFs to Markdown via the Datalab API (needs
 `DATALAB_API_KEY`); the converted `.md` is written next to the PDF. References
 and appendix are dropped by the converter, and the prompts tell both agents to
 treat parser artifacts as parser problems rather than paper flaws.
@@ -161,7 +251,7 @@ paper's real reviewer scores, coloured by the real accept/reject outcome.
 The same runs binned by pipeline score, each column normalised: the share of
 papers in that bin that were really accepted and really rejected.
 
-The set is chosen automatically from the merger backend you are running
+For SDK/API runs, the set is chosen automatically from the merger backend you are running
 (`claude_sdk:` maps to `claude.csv`, anything else to `deepseek.csv`), and the
 pipeline reports three things:
 
@@ -171,6 +261,12 @@ pipeline reports three things:
   Pearson r, R-squared and residual MAE.
 - **Empirical acceptance rate** — the fraction of reference papers at that exact
   score, and within a 0.5 window of it, that were actually accepted.
+
+CLI merger runs skip this reference mapping by default: neither CLI backend has
+a matching shipped reference run. You can opt into a chosen reference with
+`--calibration_csv results/claude.csv`, for example, but its fit is specific to
+the original model/runtime/retrieval setup. This is separate from retrieving
+calibration anchors, which stays enabled unless `--no_cal` is supplied.
 
 Fits over the shipped reference runs:
 
@@ -218,6 +314,8 @@ because that system's review for the paper is missing its outcome section.
 
 ```
 code/main.py                          two-stage pipeline, CLI, score calibration
+code/cli_backend.py                   Codex/Claude subprocess runners and usage parsing
+code/review_mcp.py                    stdio tools for CLI review sessions
 code/tools.py                         sandboxed file tools + calibration RAG index
 code/claude_merger.py                 Claude Agent SDK backend (tools over MCP)
 code/paths.py                         path resolution, HuggingFace asset fetch
@@ -237,6 +335,10 @@ figures/accept_rate_bars.py           source of the stacked bars above (+ .pdf /
 Each figure script writes a PDF (for LaTeX) and a PNG (for this page) from the
 same source; run them with `python figures/<name>.py`. The pipeline script also
 warns if any label no longer fits its box.
+
+Run the offline integration tests with `python -m unittest discover -s tests -v`.
+They exercise both CLI adapters and the real MCP server using simulated CLI
+responses, without model calls or credentials.
 
 ---
 
